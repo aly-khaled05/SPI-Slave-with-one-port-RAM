@@ -23,23 +23,19 @@ When the SPI master asserts `SS_n` (active low), the slave begins a transaction.
 
 ## System Architecture
 
-```
-                 SPI SLAVE WITH SINGLE PORT RAM
-              ┌───────────────────────────────────┐
-   MOSI ─────▶│                                     │
-              │                    rx_data     din  │
-   MISO ◀────▶│   SPI Slave    ────[10]────▶   RAM  │
-              │                    rx_valid rx_valid│
-   SS_n ─────▶│                ────────────▶        │
-              │                    tx_data    dout  │
-              │                ◀────[8]─────        │
-              │                    tx_valid tx_valid│
-              │                ◀────────────        │
-              └───────────────────────────────────┘
-                     ▲                    ▲
-   clk   ────────────┴────────────────────┘
-   rst_n ─────────────────────────────────┘
-```
+The `SPI_WRAPPER` top-level module contains two blocks:
+
+- **SPI slave** — external-facing block. Inputs: `MOSI`, `SS_n`, `clk`, `rst_n`. Output: `MISO`.
+- **RAM** — internal block, only visible to the SPI slave. Both blocks share `clk` and `rst_n`.
+
+The two blocks talk to each other over four internal signals:
+
+| Signal (SPI slave side) | Signal (RAM side) | Width | Direction        |
+|--------------------------|--------------------|:-------:|-------------------|
+| `rx_data`                 | `din`               | 10    | SPI slave → RAM   |
+| `rx_valid`                 | `rx_valid`          | 1     | SPI slave → RAM   |
+| `tx_data`                  | `dout`              | 8     | RAM → SPI slave   |
+| `tx_valid`                  | `tx_valid`          | 1     | RAM → SPI slave   |
 
 **Key signals:**
 
@@ -69,25 +65,22 @@ The SPI slave FSM has five states:
 - **READ_ADD** — shifting in a read address
 - **READ_DATA** — read address latched; RAM data is fetched and shifted out on `MISO`
 
-```
-                         SS_n = 1
-              ┌─────────────────────────────┐
-              │                             │
-              ▼                             │
-   ┌────────────────┐   SS_n = 0    ┌───────────────┐
-   │      IDLE       │ ────────────▶│  CHECK_COMMAND │
-   └────────────────┘               └───────────────┘
-        ▲   ▲   ▲                     │      │
-        │   │   │  SS_n=0 & MOSI=0    │      │ SS_n=0 & MOSI=1
-        │   │   └─────────────────────┘      │
-        │   │                                ▼
-        │   │                     add_or_data=0 ──▶ READ_ADD ──▶(self-loop while SS_n=0)
-        │   │                     add_or_data=1 ──▶ READ_DATA ─▶(self-loop while SS_n=0)
-        │   │
-        │   └── WRITE (self-loop while SS_n=0) ── SS_n=1 ──▶ IDLE
-        │
-        └── READ_ADD / READ_DATA ── SS_n=1 ──▶ IDLE
-```
+**Transitions:**
+
+| From             | Condition                              | To               |
+|------------------|-----------------------------------------|-------------------|
+| `IDLE`           | `SS_n = 1`                                | `IDLE` (self-loop) |
+| `IDLE`           | `SS_n = 0`                                | `CHECK_COMMAND`    |
+| `CHECK_COMMAND`  | `SS_n = 1`                                | `IDLE`             |
+| `CHECK_COMMAND`  | `SS_n = 0` and `MOSI = 0`                  | `WRITE`            |
+| `CHECK_COMMAND`  | `SS_n = 0`, `MOSI = 1`, `add_or_data = 0`   | `READ_ADD`         |
+| `CHECK_COMMAND`  | `SS_n = 0`, `MOSI = 1`, `add_or_data = 1`   | `READ_DATA`        |
+| `WRITE`          | `SS_n = 0`                                | `WRITE` (self-loop) |
+| `WRITE`          | `SS_n = 1`                                | `IDLE`             |
+| `READ_ADD`       | `SS_n = 0`                                | `READ_ADD` (self-loop) |
+| `READ_ADD`       | `SS_n = 1`                                | `IDLE`             |
+| `READ_DATA`      | `SS_n = 0`                                | `READ_DATA` (self-loop) |
+| `READ_DATA`      | `SS_n = 1`                                | `IDLE`             |
 
 *(See the source PDF for the fully rendered state diagram graphic.)*
 
