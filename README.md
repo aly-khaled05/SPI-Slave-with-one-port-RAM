@@ -1,134 +1,233 @@
-SPI Slave with Single-Port Synchronous RAM
-A Verilog HDL implementation of a Serial Peripheral Interface (SPI) slave controller integrated with a 256×8-bit single-port synchronous RAM. The architecture allows an SPI master to write data to or read data from memory through a 10-bit serial frame protocol.  
-PDF
-+ 1
+# SPI Slave with Single-Port RAM
 
-System Overview
-The top-level wrapper module (SPI_WRAPPER) coordinates communication between the SPI Slave interface and the Single-Port Synchronous RAM.  
-PDF
+A Verilog HDL implementation of an SPI slave interface backed by a single-port synchronous RAM, verified in QuestaSim and synthesized/implemented for a Basys3 (Xilinx 7-series) FPGA.
 
-SPI Slave Controller: Deserializes 10-bit incoming data from MOSI, decodes commands via a Finite State Machine (FSM), and serializes RAM output data onto MISO.  
-PDF
+## Overview
 
-Single-Port Synchronous RAM: Stores 256 8-bit words with synchronous active-low reset and internal write/read address registers.  
-PDF
+This project implements a digital system that lets an SPI master read from and write to an on-chip RAM through a simple SPI slave interface. The design is organized into three modules:
 
-System Architecture
-                     +----------------------------------------+
-                     |              SPI_WRAPPER               |
-                     |                                        |
-    MOSI  ----------->| +------------+        +-------------+ |
-    SS_n  ----------->| |            |        |             | |
-    clk   ----------->| | SPI_slave  |=======>| Synchronous | |
-    rst_n ----------->| |            |<=======|    RAM      | |
-    MISO  <-----------| +------------+        +-------------+ |
-                     +----------------------------------------+
-Module Specifications
-Module Name	File	Description
-SPI_WRAPPER	spi_wrapper.v	
-Top-level module integrating the SPI Slave and synchronous RAM.  
-PDF
+- **`single_port_sync_ram`** — Stores 8-bit data across 256 memory locations, controlled by write/read commands issued from the SPI slave.
+- **`SPI_slave`** — Shifts in serial data on `MOSI`, decodes commands with an FSM, and shifts data out on `MISO`.
+- **`SPI_WRAPPER`** — Top-level module that instantiates and connects the RAM and SPI slave.
 
-SPI_slave	spi_slave.v	
-FSM-based SPI slave handling serial-to-parallel deshirting & MISO transmission.  
-PDF
+### Supported operations
 
-single_port_sync_ram	single_port_sync_ram.v	
-256×8-bit memory block decoding 10-bit control vectors.  
-PDF
+1. Load a write address
+2. Write data to RAM
+3. Load a read address
+4. Read data from RAM
 
-spi_wrapper_tb	spi_wrapper_tb.v	
-Testbench verifying write address, write data, read address, and read data transactions.  
-PDF
+## System Flow
 
-Control Protocol & Command Structure
-Communication uses a 10-bit serial frame transmitted MSB-first over MOSI:  
-PDF
+When the SPI master asserts `SS_n` (active low), the slave begins a transaction. Serial bits on `MOSI` are shifted into a command/data register and interpreted according to a 2-bit opcode. On a read, the requested byte is pulled from RAM and shifted out on `MISO`.
 
-Frame Vector=[din[9:8]∣din[7:0]]
-din[9:8]: Operation command code.  
-PDF
+## System Architecture
 
-din[7:0]: 8-bit RAM address or write data payload.  
-PDF
+```
+                 SPI SLAVE WITH SINGLE PORT RAM
+              ┌───────────────────────────────────┐
+   MOSI ─────▶│                                     │
+              │                    rx_data     din  │
+   MISO ◀────▶│   SPI Slave    ────[10]────▶   RAM  │
+              │                    rx_valid rx_valid│
+   SS_n ─────▶│                ────────────▶        │
+              │                    tx_data    dout  │
+              │                ◀────[8]─────        │
+              │                    tx_valid tx_valid│
+              │                ◀────────────        │
+              └───────────────────────────────────┘
+                     ▲                    ▲
+   clk   ────────────┴────────────────────┘
+   rst_n ─────────────────────────────────┘
+```
 
-RAM Operation Decoding
-din[9:8] Code	Operation Mode	Target Register / Action
-2'b00	Write Address	
-Stores din[7:0] into internal addr_wr register.  
-PDF
+**Key signals:**
 
-2'b01	Write Data	
-Writes din[7:0] into memory location mem[addr_wr].  
-PDF
+| Signal     | Width | Direction (Slave → RAM unless noted) | Description                                      |
+|------------|-------|---------------------------------------|---------------------------------------------------|
+| `rx_data`  | 10    | SPI slave → RAM (`din`)                | Incoming command + address/data                   |
+| `rx_valid` | 1     | SPI slave → RAM                        | Asserted when `rx_data` is ready to be processed   |
+| `tx_data`  | 8     | RAM (`dout`) → SPI slave                | Byte read from RAM, to be sent to the master       |
+| `tx_valid` | 1     | RAM → SPI slave                        | Asserted when `tx_data` is ready for transmission  |
 
-2'b10	Read Address	
-Stores din[7:0] into internal addr_rd register.  
-PDF
+### `rx_data` command encoding (`din[9:8]`)
 
-2'b11	Read Data	
-Loads mem[addr_rd] to dout and asserts tx_valid.  
-PDF
+| Code   | Operation          | `din[7:0]` meaning |
+|--------|---------------------|---------------------|
+| `2'b00`| Load write address  | Write address       |
+| `2'b01`| Write data          | Data byte           |
+| `2'b10`| Load read address   | Read address        |
+| `2'b11`| Read data           | (triggers `dout <= mem[addr_rd]`) |
 
-FSM State Description
-The SPI Slave uses a 5-state FSM to decode commands and control data flow:  
-PDF
+## State Diagram
 
-IDLE (3'b000): Waits for SS_n to drop low (0).  
-PDF
+The SPI slave FSM has five states:
 
-CHECK_COMMAND (3'b001): Samples MOSI to distinguish write operations from read operations.  
-PDF
+- **IDLE** — waiting for `SS_n` to go low
+- **CHECK_COMMAND** — reads the first `MOSI` bit(s) to decide the operation
+- **WRITE** — shifting in a write address or write data (10 bits total)
+- **READ_ADD** — shifting in a read address
+- **READ_DATA** — read address latched; RAM data is fetched and shifted out on `MISO`
 
-WRITE (3'b010): Deserializes 10 bits for Write Address (00) or Write Data (01) commands.  
-PDF
+```
+                         SS_n = 1
+              ┌─────────────────────────────┐
+              │                             │
+              ▼                             │
+   ┌────────────────┐   SS_n = 0    ┌───────────────┐
+   │      IDLE       │ ────────────▶│  CHECK_COMMAND │
+   └────────────────┘               └───────────────┘
+        ▲   ▲   ▲                     │      │
+        │   │   │  SS_n=0 & MOSI=0    │      │ SS_n=0 & MOSI=1
+        │   │   └─────────────────────┘      │
+        │   │                                ▼
+        │   │                     add_or_data=0 ──▶ READ_ADD ──▶(self-loop while SS_n=0)
+        │   │                     add_or_data=1 ──▶ READ_DATA ─▶(self-loop while SS_n=0)
+        │   │
+        │   └── WRITE (self-loop while SS_n=0) ── SS_n=1 ──▶ IDLE
+        │
+        └── READ_ADD / READ_DATA ── SS_n=1 ──▶ IDLE
+```
 
-READ_ADD (3'b011): Deserializes 10 bits for Read Address (10) command and sets add_or_data flag.  
-PDF
+*(See the source PDF for the fully rendered state diagram graphic.)*
 
-READ_DATA (3'b100): Deserializes 10 bits for Read Data (11) command and shifts out target memory content over MISO.  
-PDF
+## SPI Transaction Format
 
-Synthesis & Implementation Results
-The design was synthesized and targeted for the Xilinx Basys 3 FPGA (Artix-7). A comparison of FSM encoding strategies was evaluated to maximize timing performance:  
-PDF
-+ 1
+Each transaction is `SS_n` asserted for the duration of one command:
 
-FSM Encoding Scheme	Worst Negative Slack (WNS) - Synth	Worst Negative Slack (WNS) - Impl	Total LUTs	Total Registers
-One-Hot	6.443 ns	5.686 ns	30	61
-Gray	6.471 ns	—	30	57
-Sequential	6.471 ns	—	30	57
-Design Choice: One-Hot encoding was selected for the final implementation as it provided superior timing slack margins for high-speed operation.  
-PDF
+| Transaction        | Bit 1 (`MOSI`) | Bit 2 (`MOSI`) | Following bits              |
+|---------------------|:--------------:|:--------------:|-------------------------------|
+| Write address        | `0`            | `0`             | 8-bit address, MSB first      |
+| Write data            | `0`            | `1`             | 8-bit data, MSB first          |
+| Read address (setup)  | `1`            | `0`             | 8-bit address, MSB first      |
+| Read data              | `1`            | `1`             | 8 don't-care bits; `MISO` returns the byte |
 
-File Structure
-Plaintext
+Internally, the slave shifts in a 10-bit `data` register (`{cmd[1:0], addr_or_data[7:0]}`) and asserts `rx_valid` once all 10 bits have been received (`counter == 10`).
+
+## File Structure
+
+```
 .
-├── rtl/
-│   ├── single_port_sync_ram.v   # Synchronous RAM memory module
-│   ├── SPI_slave.v              # FSM SPI Slave controller
-│   └── SPI_WRAPPER.v            # Top-level integration module
-├── testbench/
-│   ├── spi_wrapper_tb.v         # Testbench file
-│   └── mem.dat                  # Memory initialization payload
-├── scripts/
-│   └── run.do                   # QuestaSim / ModelSim execution script
-├── constraints/
-│   └── Basys3_Master.xdc        # Xilinx Vivado pin constraints
-└── README.md
-How to Run Simulation
-Using QuestaSim / ModelSim
-Run the provided macro script directly from the simulation command line:  
-PDF
+├── spi1.v              # RTL: single_port_sync_ram, SPI_slave, SPI_WRAPPER
+├── spitb.v             # Testbench: spi_wrapper_tb
+├── mem.dat             # Memory preload file (read via $readmemh)
+├── sim.do              # QuestaSim simulation script
+└── constraints.xdc     # Basys3 pin constraints
+```
 
-Bash
-vsim -do scripts/run.do
-run.do Script Content:
+## Module Interfaces
 
-Tcl
+### `single_port_sync_ram`
+
+```verilog
+module single_port_sync_ram (din, rx_valid, clk, rst_n, tx_valid, dout);
+parameter MEM_DEPTH = 256;
+parameter ADDR_SIZE = 8;
+```
+
+| Port       | Dir | Width | Description                          |
+|------------|-----|-------|---------------------------------------|
+| `din`      | in  | 10    | Command + address/data from SPI slave |
+| `rx_valid` | in  | 1     | Latch `din` on this cycle             |
+| `clk`      | in  | 1     | System clock                          |
+| `rst_n`    | in  | 1     | Synchronous active-low reset          |
+| `tx_valid` | out | 1     | `dout` is valid                       |
+| `dout`     | out | 8     | Data read from `mem[addr_rd]`         |
+
+### `SPI_slave`
+
+```verilog
+module SPI_slave (MOSI, SS_n, tx_data, tx_valid, clk, rst_n, MISO, rx_data, rx_valid);
+```
+
+| Port       | Dir | Width | Description                          |
+|------------|-----|-------|---------------------------------------|
+| `MOSI`     | in  | 1     | Master-out, slave-in serial line      |
+| `SS_n`     | in  | 1     | Active-low slave select               |
+| `tx_data`  | in  | 8     | Byte to transmit, from RAM            |
+| `tx_valid` | in  | 1     | `tx_data` is valid                    |
+| `clk`      | in  | 1     | System clock                          |
+| `rst_n`    | in  | 1     | Synchronous active-low reset          |
+| `MISO`     | out | 1     | Master-in, slave-out serial line      |
+| `rx_data`  | out | 10    | Decoded command + address/data        |
+| `rx_valid` | out | 1     | `rx_data` is valid                    |
+
+### `SPI_WRAPPER`
+
+```verilog
+module SPI_WRAPPER (clk, rst_n, MOSI, SS_n, MISO);
+```
+
+Top-level module; instantiates `single_port_sync_ram` and `SPI_slave` and wires them together internally.
+
+## Simulation
+
+Simulated with **QuestaSim**. The testbench (`spi_wrapper_tb`) preloads RAM from `mem.dat`, applies reset, then drives four back-to-back transactions:
+
+1. Write address
+2. Write data
+3. Read address
+4. Read data (captures the returned byte on `MISO`)
+
+### Running the simulation
+
+```tcl
 vlib work
-vlog rtl/single_port_sync_ram.v rtl/SPI_slave.v rtl/SPI_WRAPPER.v testbench/spi_wrapper_tb.v
+vlog spi1.v spitb.v
 vsim -voptargs=+acc spi_wrapper_tb
-add wave sim:/spi_wrapper_tb/*
-add wave sim:/spi_wrapper_tb/DUT/*
+add wave sim:/spi_wrapper_tb/clk
+add wave sim:/spi_wrapper_tb/rst_n
+add wave sim:/spi_wrapper_tb/MOSI
+add wave sim:/spi_wrapper_tb/SS_n
+add wave sim:/spi_wrapper_tb/MISO
+add wave sim:/spi_wrapper_tb/DUT/rx_data_to_din
+add wave sim:/spi_wrapper_tb/DUT/rx_valid
+add wave sim:/spi_wrapper_tb/DUT/tx_data_to_dout
+add wave sim:/spi_wrapper_tb/DUT/tx_valid
+add wave sim:/spi_wrapper_tb/DUT/ram/mem
 run -all
+```
+
+(Save this as `sim.do` and run `do sim.do` from the QuestaSim console.)
+
+Waveform inspection confirmed correct address loading, data storage, and data retrieval across all four transaction types.
+
+## Synthesis & Implementation (Vivado, Basys3)
+
+The design was linted, synthesized, and implemented targeting a **Basys3 (Artix-7)** board. Pin assignments live in the constraint file:
+
+| Signal   | Package Pin | Standard  |
+|----------|-------------|-----------|
+| `clk`    | W5          | LVCMOS33  |
+| `rst_n`  | V17         | LVCMOS33  |
+| `SS_n`   | V16         | LVCMOS33  |
+| `MOSI`   | W16         | LVCMOS33  |
+| `MISO`   | U16         | LVCMOS33  |
+
+Clock constraint: 10 ns period (100 MHz), `create_clock -period 10.000`.
+
+### FSM encoding comparison
+
+Three FSM encodings were synthesized and implemented for comparison: **one-hot**, **gray**, and **sequential** (binary).
+
+| Encoding   | WNS after Synthesis | WNS after Implementation | Slice Registers (top) |
+|------------|:--------------------:|:--------------------------:|:------------------------:|
+| One-hot    | 6.443 ns             | 5.686 ns                   | 61                        |
+| Gray       | 6.471 ns             | 5.246 ns                   | 57                        |
+| Sequential | 6.471 ns             | 5.108 ns                   | 57                        |
+
+**Conclusion:** Since this is an SPI controller, meeting timing is critical for reliable high-speed data transfer. One-hot encoding produced the largest Worst Negative Slack (WNS), giving the best timing margin, and was therefore selected for the final implementation — trading a small increase in register count for the fastest, most robust operation.
+
+All three encodings met every user-specified timing constraint with zero failing endpoints.
+
+## Resource Utilization (One-Hot, post-implementation)
+
+| Module        | Slice LUTs | Slice Registers | Block RAM Tile | Bonded IOB |
+|---------------|:----------:|:----------------:|:----------------:|:------------:|
+| `SPI_WRAPPER` (top) | 30    | 61                | 0.5               | 5            |
+| `ram`         | 1          | 17                | 0.5               | 0            |
+| `spi`         | 29         | 44                | 0                 | 0            |
+
+## Author
+
+Prepared by Aly Khaled.
